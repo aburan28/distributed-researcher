@@ -27,9 +27,7 @@ pub fn epoch_of(timestamp_seconds: u64, epoch_seconds: u64) -> u64 {
     timestamp_seconds / epoch_seconds
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+use crate::canonical::hex_lower as hex;
 
 pub fn beacon(epoch: u64, anchor: &str) -> String {
     let mut hasher = Sha256::new();

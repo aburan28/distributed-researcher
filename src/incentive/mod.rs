@@ -81,6 +81,7 @@ pub mod exact;
 pub mod game;
 pub mod mechanism;
 pub mod robustness;
+pub mod sweep;
 
 use std::fmt;
 

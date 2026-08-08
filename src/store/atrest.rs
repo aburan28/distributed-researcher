@@ -59,7 +59,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use chacha20poly1305::ChaCha20Poly1305;
 use rand_core::{CryptoRng, RngCore};
 use std::fmt;
 use std::fs;
@@ -210,7 +210,7 @@ impl Cipher {
         let cipher = ChaCha20Poly1305::new(self.key.expose().into());
         let sealed = cipher
             .encrypt(
-                Nonce::from_slice(&nonce_bytes),
+                (&nonce_bytes).into(),
                 Payload {
                     msg: plaintext,
                     aad: aad.as_bytes(),
@@ -238,18 +238,19 @@ impl Cipher {
         let (nonce_hex, ciphertext_hex) = rest
             .split_once(':')
             .ok_or(AtRestError::Undecryptable { line: index })?;
-        let nonce_bytes =
-            hex_decode(nonce_hex).ok_or(AtRestError::Undecryptable { line: index })?;
-        if nonce_bytes.len() != NONCE_LEN {
-            return Err(AtRestError::Undecryptable { line: index });
-        }
+        // Fixed-size on the spot rather than a `Vec` with a length check beside
+        // it: the AEAD wants an array-shaped nonce, and converting here means
+        // the wrong length is refused in the one place it can be.
+        let nonce_bytes: [u8; NONCE_LEN] = hex_decode(nonce_hex)
+            .and_then(|bytes| <[u8; NONCE_LEN]>::try_from(bytes).ok())
+            .ok_or(AtRestError::Undecryptable { line: index })?;
         let ciphertext =
             hex_decode(ciphertext_hex).ok_or(AtRestError::Undecryptable { line: index })?;
         let aad = line_aad(index);
         let cipher = ChaCha20Poly1305::new(self.key.expose().into());
         cipher
             .decrypt(
-                Nonce::from_slice(&nonce_bytes),
+                (&nonce_bytes).into(),
                 Payload {
                     msg: &ciphertext,
                     aad: aad.as_bytes(),
@@ -297,7 +298,7 @@ impl Cipher {
                 let cipher = ChaCha20Poly1305::new(wrapping.expose().into());
                 let sealed = cipher
                     .encrypt(
-                        Nonce::from_slice(&nonce_bytes),
+                        (&nonce_bytes).into(),
                         Payload {
                             msg: self.key.expose(),
                             aad: KEY_AAD,
@@ -388,9 +389,8 @@ fn unwrap_key_file(path: &Path, rest: &str, passphrase: &str) -> Result<Cipher, 
     let lanes: u32 = lanes.parse().map_err(|_| malformed("bad lane count"))?;
     let salt = hex_decode(salt).ok_or_else(|| malformed("salt is not hexadecimal"))?;
     let nonce_bytes = hex_decode(nonce).ok_or_else(|| malformed("nonce is not hexadecimal"))?;
-    if nonce_bytes.len() != NONCE_LEN {
-        return Err(malformed("nonce is the wrong length"));
-    }
+    let nonce_bytes = <[u8; NONCE_LEN]>::try_from(nonce_bytes)
+        .map_err(|_| malformed("nonce is the wrong length"))?;
     let ciphertext =
         hex_decode(ciphertext).ok_or_else(|| malformed("ciphertext is not hexadecimal"))?;
 
@@ -398,7 +398,7 @@ fn unwrap_key_file(path: &Path, rest: &str, passphrase: &str) -> Result<Cipher, 
     let cipher = ChaCha20Poly1305::new(wrapping.expose().into());
     let opened = cipher
         .decrypt(
-            Nonce::from_slice(&nonce_bytes),
+            (&nonce_bytes).into(),
             Payload {
                 msg: &ciphertext,
                 aad: KEY_AAD,

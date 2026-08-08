@@ -65,11 +65,16 @@ cargo install --path .        # puts `proofwork` and the other binaries on PATH
 cargo test                    # the full suite, loopback only
 ./scripts/demo.sh             # objectives, commit-reveal, audit, attribution
 ./scripts/ratchet-demo.sh     # progressive bounty: publishing beats hoarding
+./scripts/try-demo.sh         # one round in one command, and a scaffolded challenge
 ./scripts/interop.sh          # each implementation audits the other's log
 ./scripts/mcp-smoke.sh        # the MCP server, driven as a real process
 ./scripts/blob-demo.sh        # a node with only the log fetches its verifier and uses it
 ./scripts/p2p-demo.sh         # two daemons: an empty node syncs, then audits under both
 proofwork incentives          # evaluate the node-operator game (~2s)
+proofwork incentives --sweep canary-rate=1/20..1/5:5 --out grid.csv
+                              # ...across a grid instead of at one point, one row per
+                              # point, so a threshold is visible without re-reading
+                              # a hundred reports by eye
 proofwork incentives --robustness   # ...and how far each parameter can move before it
                                     # breaks. Seventeen parameters walked out along a
                                     # twelve-rung ladder in both directions, the whole
@@ -286,6 +291,10 @@ unrepresentable.
 proofwork post   examples/capset/objective.json
 proofwork commit <objective-id> --submitter bob --artifact solution.json --nonce s3cret
 proofwork reveal <objective-id> --submitter bob --artifact solution.json --nonce s3cret
+proofwork try    examples/capset/objective.json --submitter bob --artifact solution.json
+                                                 # the three lines above in one, waiting out
+                                                 # the epoch between commit and reveal
+proofwork scaffold my-challenge --kind certificate  # the files a new objective starts from
 proofwork audit
 proofwork attribute
 proofwork checkpoint --root-key key.json --out checkpoint.json   # sign it

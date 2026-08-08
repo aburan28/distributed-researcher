@@ -45,7 +45,7 @@
 //! Nothing in this module does that for you.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use classic_mceliece_rust::{
     decapsulate_boxed, encapsulate_boxed, keypair_boxed, Ciphertext, PublicKey, SecretKey,
     CRYPTO_CIPHERTEXTBYTES, CRYPTO_PUBLICKEYBYTES, CRYPTO_SECRETKEYBYTES,
@@ -335,7 +335,7 @@ fn seal_frame(
     if counter == u64::MAX {
         return Err(HandshakeError::CounterExhausted);
     }
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     cipher
         .encrypt(
             &nonce_for(counter),
@@ -355,7 +355,7 @@ fn open_frame(
     ciphertext: &[u8],
     context: &[u8],
 ) -> Result<Vec<u8>, HandshakeError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     cipher
         .decrypt(
             &nonce_for(counter),
@@ -525,7 +525,7 @@ impl Opener {
 fn nonce_for(counter: u64) -> Nonce {
     let mut bytes = [0u8; 12];
     bytes[..8].copy_from_slice(&counter.to_le_bytes());
-    *Nonce::from_slice(&bytes)
+    bytes.into()
 }
 
 /// The counter is authenticated as well as used as the nonce, so a frame

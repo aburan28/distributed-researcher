@@ -56,6 +56,7 @@
 
 use std::fmt;
 
+use crate::hex;
 use hmac::{Hmac, Mac};
 use sha2::{Digest as _, Sha256};
 
@@ -135,10 +136,7 @@ impl std::error::Error for PartitionError {}
 /// spelling is part of the wire format. Prefixing it would change every
 /// assignment in the network.
 pub fn beacon(epoch: u64, anchor: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{epoch}:{anchor}").as_bytes())
-    )
+    hex::encode(&Sha256::digest(format!("{epoch}:{anchor}").as_bytes()))
 }
 
 /// Which slice of the search space this node takes. Pure, local, checkable.
@@ -247,10 +245,9 @@ pub fn epoch_seconds() -> u64 {
 /// Returned as hex so the ordering is a plain lexicographic string compare that
 /// any implementation reproduces, and so an auditor can print it.
 pub fn settlement_rank(epoch: u64, anchor: &str, key: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{}{key}", beacon(epoch, anchor)).as_bytes())
-    )
+    hex::encode(&Sha256::digest(
+        format!("{}{key}", beacon(epoch, anchor)).as_bytes(),
+    ))
 }
 
 /// One node's claim on one objective for one epoch.
@@ -735,10 +732,9 @@ mod tests {
 
     #[test]
     fn settlement_rank_is_the_hash_of_the_beacon_and_the_id() {
-        let expected = format!(
-            "{:x}",
-            Sha256::digest(format!("{}{}", beacon(3, "head"), "claim:x").as_bytes())
-        );
+        let expected = crate::hex::encode(&Sha256::digest(
+            format!("{}{}", beacon(3, "head"), "claim:x").as_bytes(),
+        ));
         assert_eq!(settlement_rank(3, "head", "claim:x"), expected);
     }
 }

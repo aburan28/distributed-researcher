@@ -37,6 +37,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::hex;
 use sha2::{Digest as _, Sha256};
 
 pub const DIGEST_PREFIX: &str = "sha256:";
@@ -534,7 +535,7 @@ fn write_escaped(s: &str, out: &mut String) {
 pub fn digest_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{DIGEST_PREFIX}{:x}", hasher.finalize())
+    format!("{DIGEST_PREFIX}{}", hex::encode(&hasher.finalize()))
 }
 
 /// Display form, e.g. `sha256:ab12cd34`. Never use for equality.

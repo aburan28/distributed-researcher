@@ -931,22 +931,9 @@ fn wipe_shares(shares: &mut [Share]) {
 /// which are published -- and it is why [`Secret32`] has no hex or `Display`
 /// impl. Do not reach for this to print key material.
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        out.push(hex_digit(byte >> 4));
-        out.push(hex_digit(byte & 0x0f));
-    }
-    out
-}
-
-fn hex_digit(value: u8) -> char {
-    match value {
-        0..=9 => char::from(b'0' + value),
-        10..=15 => char::from(b'a' + value - 10),
-        // Unreachable: callers pass a nibble. Total anyway, because a panic in a
-        // formatter is a worse outcome than an odd character.
-        _ => '?',
-    }
+    // One encoder for the whole crate, in `crate::hex`. A second copy here is a
+    // second thing that could disagree about how a published byte is spelled.
+    crate::hex::encode(bytes)
 }
 
 /// Strict decoder: lowercase only.

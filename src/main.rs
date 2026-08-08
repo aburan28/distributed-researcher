@@ -70,13 +70,14 @@ use proofwork::canonical::{short, CanonicalError, Value};
 use proofwork::checkpoint::{RootKey, SignedCheckpoint};
 use proofwork::crypto::identity::Identity;
 use proofwork::incentive::design::Report as IncentiveReport;
-use proofwork::incentive::{NodeParams, ParamError, Rat};
+use proofwork::incentive::{sweep, NodeParams, ParamError, Rat};
 use proofwork::ledger::{Codec, Ledger, LedgerError, Proof};
 use proofwork::node::Node;
 use proofwork::records::{
     commitment_hash, Availability, AvailabilityPool, Claim, Commitment, Objective, PeerRecord,
     RecordError, Undertaking,
 };
+use proofwork::scaffold;
 use proofwork::schema::{validate_claim, validate_objective, SchemaError};
 use proofwork::serve::Spool;
 use proofwork::store::atrest::{AtRestError, Cipher};
@@ -559,6 +560,49 @@ enum Command {
         /// Also report how far each parameter can move before the mechanism
         /// breaks. Opt-in because it is hundreds of full solver runs.
         robustness: bool,
+        /// Parameters to walk across a grid instead of evaluating one point.
+        ///
+        /// Empty is the ordinary single-point report. Non-empty replaces the
+        /// prose report with a table, because the two answer different
+        /// questions and interleaving them would give a reader a hundred
+        /// reports to compare by eye -- the thing the sweep exists to stop.
+        sweep: Vec<sweep::Axis>,
+        /// Where the table goes. `None` is standard output.
+        out: Option<String>,
+        format: TableFormat,
+    },
+    /// One bounty round end to end: post if needed, commit, wait, reveal.
+    ///
+    /// A convenience wrapper over the existing primitives and nothing more --
+    /// no new record kind, no change to what `commit` and `reveal` accept, no
+    /// change to how settlement orders. It exists because trying one artifact
+    /// against one objective was five invocations with a manual sleep across
+    /// the epoch boundary in the middle, which is what `scripts/demo.sh` and
+    /// `scripts/ratchet-demo.sh` hand-roll in bash.
+    Try {
+        /// An objective id, or a file to post first.
+        objective: String,
+        submitter: String,
+        artifact: String,
+        nonce: Option<String>,
+        identity: Option<String>,
+        cites: Vec<String>,
+        /// Also wait out the reveal epoch and settle, so the round ends with a
+        /// payout rather than a "settles when epoch N closes".
+        settle: bool,
+    },
+    /// Write the files a new objective starts from, and post nothing.
+    ///
+    /// The posting stays a separate, reviewed step: an objective's statement
+    /// is untrusted text that a human decides to fund, and a tool that wrote
+    /// and funded one in the same breath would remove the place that decision
+    /// happens. See [`proofwork::scaffold`].
+    Scaffold {
+        request: Box<scaffold::Request>,
+        /// Overwrite files that are already there. Off by default, because the
+        /// obvious mistake is scaffolding over an objective already posted --
+        /// whose pin is in the log and whose id covers it.
+        force: bool,
     },
     /// Create an at-rest key.
     /// Canonicalize one JSON value and print its digest.
@@ -602,6 +646,17 @@ enum Command {
     },
     Log,
     Help,
+}
+
+/// How a sweep's table is written.
+///
+/// Both are line-oriented, which is the point: whatever an operator already
+/// plots with reads one of them, and neither needs this tool to grow a
+/// formatter with opinions about column widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableFormat {
+    Csv,
+    Jsonl,
 }
 
 /// What `proofwork blob` was asked to do.
@@ -860,6 +915,8 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "attribute" => parse_attribute(&mut cursor)?,
         "blob" => parse_blob(&mut cursor)?,
         "incentives" => parse_incentives(&mut cursor)?,
+        "scaffold" => parse_scaffold(&mut cursor)?,
+        "try" => parse_try(&mut cursor)?,
         "canon" => {
             let mut input: Option<String> = None;
             while let Some(token) = cursor.take() {
@@ -1294,6 +1351,158 @@ fn parse_check(cursor: &mut Cursor) -> Result<Command, CliError> {
     })
 }
 
+/// `try <objective-id|objective.json> --submitter S --artifact FILE [--nonce N]`
+///
+/// Takes the same flags `commit` and `reveal` take, because it is those two
+/// commands with the wait in between. A flag that meant something different
+/// here than it does there would be the whole cost of the convenience.
+fn parse_try(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut objective: Option<String> = None;
+    let mut submitter: Option<String> = None;
+    let mut artifact: Option<String> = None;
+    let mut nonce: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut cites: Vec<String> = Vec::new();
+    let mut settle = false;
+
+    while let Some(token) = cursor.take() {
+        if token == "--submitter" {
+            submitter = Some(cursor.value("--submitter")?);
+        } else if token == "--artifact" {
+            artifact = Some(cursor.value("--artifact")?);
+        } else if token == "--nonce" {
+            nonce = Some(cursor.value("--nonce")?);
+        } else if token == "--identity" {
+            identity = Some(cursor.value("--identity")?);
+        } else if token == "--settle" {
+            settle = true;
+        } else if token == "--cites" {
+            // Same `nargs="*"` shape as `reveal`: claim ids are `sha256:`
+            // digests, so none can be mistaken for a flag.
+            while let Some(next) = cursor.peek_owned() {
+                if is_flag(&next) {
+                    break;
+                }
+                cursor.take();
+                cites.push(next);
+            }
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!("try: unknown option {token:?}")));
+        } else if objective.is_some() {
+            return Err(CliError::Usage(format!(
+                "try: unexpected argument {token:?}"
+            )));
+        } else {
+            objective = Some(token);
+        }
+    }
+
+    Ok(Command::Try {
+        objective: require(objective, "try", "an objective id or a JSON file")?,
+        submitter: match (submitter, &identity) {
+            (Some(submitter), _) => submitter,
+            (None, Some(_)) => String::new(),
+            (None, None) => {
+                return Err(CliError::Usage(
+                    "try: --submitter or --identity is required".into(),
+                ))
+            }
+        },
+        artifact: require(artifact, "try", "--artifact")?,
+        nonce: nonce.filter(|value| !value.is_empty()),
+        identity,
+        cites,
+        settle,
+    })
+}
+
+/// `scaffold <name> --kind <kind> [--out DIR] [--artifact-example FILE] ...`
+///
+/// Reads a worked artifact if one is offered and refuses everything it cannot
+/// turn into a postable objective, so that the failure is a command line error
+/// rather than a directory of files that `post` will reject.
+fn parse_scaffold(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let name = match cursor.peek() {
+        Some(token) if !is_flag(token) => cursor.take().unwrap_or_default(),
+        _ => {
+            return Err(CliError::Usage(String::from(
+                "scaffold needs a name: scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
+            )))
+        }
+    };
+    let mut kind: Option<scaffold::Kind> = None;
+    let mut parent: Option<String> = None;
+    let mut goal: Option<String> = None;
+    let mut statement: Option<String> = None;
+    let mut funder: Option<String> = None;
+    let mut reward: Option<u64> = None;
+    let mut example: Option<String> = None;
+    let mut force = false;
+
+    while let Some(token) = cursor.take() {
+        match token.as_str() {
+            "--kind" => {
+                let value = cursor.value("--kind")?;
+                kind = Some(scaffold::Kind::parse(&value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "scaffold --kind: expected one of ({}), got {value:?}",
+                        scaffold::KINDS
+                            .iter()
+                            .map(|kind| kind.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?);
+            }
+            "--out" => parent = Some(cursor.value("--out")?),
+            "--goal" => goal = Some(cursor.value("--goal")?),
+            "--statement" => statement = Some(cursor.value("--statement")?),
+            "--funder" => funder = Some(cursor.value("--funder")?),
+            "--reward" => reward = Some(parse_u64(&cursor.value("--reward")?, "--reward")?),
+            "--artifact-example" => example = Some(cursor.value("--artifact-example")?),
+            "--force" => force = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "scaffold: unknown option {other:?}"
+                )))
+            }
+        }
+    }
+
+    let kind = kind.ok_or_else(|| {
+        CliError::Usage(String::from(
+            "scaffold needs --kind: the verifier decides what a submission has to be,              and there is no sensible default for that",
+        ))
+    })?;
+    let mut request = scaffold::Request::new(name, kind);
+    if let Some(parent) = parent {
+        request.parent = parent;
+    }
+    if let Some(goal) = goal {
+        request.goal = goal;
+    }
+    if let Some(statement) = statement {
+        request.statement = statement;
+    }
+    if let Some(funder) = funder {
+        request.funder = funder;
+    }
+    if let Some(reward) = reward {
+        request.reward = reward;
+    }
+    if let Some(path) = example {
+        request.artifact_example = Some(read_json(&path)?);
+    }
+    // Planned here so a bad name or an escaping --out is a usage error before
+    // any directory is created.
+    scaffold::plan(&request).map_err(|error| CliError::Usage(error.to_string()))?;
+
+    Ok(Command::Scaffold {
+        request: Box::new(request),
+        force,
+    })
+}
+
 /// `incentives [--nodes N] [--settled N] [--stake N] [--fee N/D] ...`
 ///
 /// Every flag overrides one field of [`NodeParams::reference`], so an analyst
@@ -1309,10 +1518,42 @@ fn parse_check(cursor: &mut Cursor) -> Result<Command, CliError> {
 fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut params = NodeParams::reference();
     let mut robustness = false;
+    let mut sweep_axes: Vec<sweep::Axis> = Vec::new();
+    let mut out: Option<String> = None;
+    let mut format = TableFormat::Csv;
 
     while let Some(token) = cursor.take() {
         match token.as_str() {
             "--robustness" => robustness = true,
+            "--sweep" => {
+                let spec = cursor.value("--sweep")?;
+                let axis = sweep::Axis::parse(&spec)
+                    .map_err(|error| CliError::Usage(error.to_string()))?;
+                // A parameter swept twice is a grid with the same column
+                // twice, where the second silently overwrites the first at
+                // every point. Refused rather than resolved, because either
+                // resolution surprises somebody.
+                if sweep_axes.iter().any(|existing| existing.knob == axis.knob) {
+                    return Err(CliError::Usage(format!(
+                        "--sweep {}: swept twice; one range per parameter",
+                        axis.knob.name()
+                    )));
+                }
+                sweep_axes.push(axis);
+            }
+            "--out" => out = Some(cursor.value("--out")?),
+            "--format" => {
+                let value = cursor.value("--format")?;
+                format = match value.as_str() {
+                    "csv" => TableFormat::Csv,
+                    "jsonl" => TableFormat::Jsonl,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "incentives --format: expected csv or jsonl, got {other:?}"
+                        )))
+                    }
+                };
+            }
             "--nodes" => params.nodes = parse_u32(&cursor.value("--nodes")?, "--nodes")?,
             "--settled" => {
                 params.settled_value = parse_u64(&cursor.value("--settled")?, "--settled")?
@@ -1371,10 +1612,26 @@ fn parse_incentives(cursor: &mut Cursor) -> Result<Command, CliError> {
 
     // Validated here so a nonsense network is a command line error rather than
     // a surprise partway through a report.
-    params.validate().map_err(CliError::Params)?;
+    //
+    // The base point of a sweep is exempt: an axis overwrites the field it
+    // names at every point, so a base that is invalid only *because* of a
+    // field some axis replaces is not a network anyone was asked about. The
+    // per-point check in `sweep::run` is the one that decides, and it reports
+    // a refused point as a row rather than as a usage error.
+    if sweep_axes.is_empty() {
+        params.validate().map_err(CliError::Params)?;
+    }
+    if sweep_axes.is_empty() && (out.is_some() || format != TableFormat::Csv) {
+        return Err(CliError::Usage(String::from(
+            "incentives --out/--format describe a sweep's table: add --sweep NAME=LO..HI[:STEPS]",
+        )));
+    }
     Ok(Command::Incentives {
         params: Box::new(params),
         robustness,
+        sweep: sweep_axes,
+        out,
+        format,
     })
 }
 
@@ -1751,6 +2008,50 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      evaluate the node-operator game at a parameter set",
     );
+    say(
+        out,
+        "  incentives --sweep NAME=LO..HI[:STEPS] [--sweep ...] [--out FILE] [--format csv|jsonl]",
+    );
+    say(
+        out,
+        "      evaluate the same game across a grid and emit one row per point,",
+    );
+    say(
+        out,
+        "      e.g. --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4",
+    );
+    say(
+        out,
+        "  try <objective-id|objective.json> --submitter <who> --artifact <file> [--settle]",
+    );
+    say(
+        out,
+        "      one round end to end: post if needed, commit, wait out the epoch, reveal.",
+    );
+    say(
+        out,
+        "      A real round takes a real epoch (600s); $PROOFWORK_EPOCH_SECONDS shortens it",
+    );
+    say(
+        out,
+        "      for a local trial, against a log used for nothing else",
+    );
+    say(
+        out,
+        "  scaffold <name> --kind <certificate|evaluator|statistical|replay|lean>",
+    );
+    say(
+        out,
+        "           [--out DIR] [--artifact-example FILE] [--reward N] [--funder WHO]",
+    );
+    say(
+        out,
+        "      write the files a new objective starts from -- and post nothing, because",
+    );
+    say(
+        out,
+        "      funding a statement is a decision a person makes after reading it",
+    );
     say(out, "  log");
     say(out, "      print the log");
     say(out, "  canon --input <file>");
@@ -1876,6 +2177,21 @@ fn read_json(path: &str) -> Result<Value, CliError> {
 }
 
 fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, CliError> {
+    post_objective_file(out, options, path)?;
+    Ok(0)
+}
+
+/// Post the objective in `path` and return its id.
+///
+/// Split out of [`cmd_post`] so [`cmd_try`] posts by exactly the same route
+/// rather than by a second copy of it. The copy is what would eventually drift
+/// -- specifically past the unresolved-pin warning below, which is the one
+/// output here that tells a funder they have minted a bounty nobody can settle.
+fn post_objective_file(
+    out: &mut dyn Write,
+    options: &Options,
+    path: &str,
+) -> Result<String, CliError> {
     let mut node = open_node_for_writing(options)?;
     let data = read_json(path)?;
     // The published schema runs *before* the constructor. `Objective::from_value`
@@ -1929,7 +2245,7 @@ fn cmd_post(out: &mut dyn Write, options: &Options, path: &str) -> Result<i32, C
              the id covers it, this is now a different objective that can never settle.",
         );
     }
-    Ok(0)
+    Ok(id)
 }
 
 /// Read a submitter identity from disk, if one was asked for.
@@ -2858,10 +3174,20 @@ fn cmd_availability(
 
 /// The epoch containing this moment, by the same rule every record uses.
 fn current_epoch() -> Result<u64, CliError> {
-    let ts = timestamp();
-    let seconds = proofwork::time::parse_rfc3339(&ts)
+    epoch_of_stamp(&timestamp())
+}
+
+/// The epoch a record stamped `ts` belongs to.
+///
+/// The epoch of a record is derived from the record, never from a clock -- see
+/// the module docs on [`proofwork::partition`]. Anything that reads a clock
+/// again to decide a record's epoch is reading a different number.
+fn epoch_of_stamp(ts: &str) -> Result<u64, CliError> {
+    let seconds = proofwork::time::parse_rfc3339(ts)
         .and_then(|seconds| u64::try_from(seconds).ok())
-        .ok_or_else(|| CliError::Usage(format!("cannot read the current time {ts:?}")))?;
+        .ok_or_else(|| {
+            CliError::Usage(format!("cannot read the timestamp {ts:?} as an instant"))
+        })?;
     Ok(proofwork::partition::epoch_of(
         seconds,
         proofwork::partition::epoch_seconds(),
@@ -3173,6 +3499,464 @@ fn cmd_incentives(
         }
     }
     Ok(if report.passes() { 0 } else { 1 })
+}
+
+/// `try <objective-id|objective.json> --submitter S --artifact FILE ...`
+///
+/// Post if needed, commit, wait for the epoch to turn, reveal, print the
+/// verdict. A wrapper over the existing primitives -- it appends nothing the
+/// five commands it calls would not have appended, in the same order.
+///
+/// Two things it is careful about.
+///
+/// **It waits by polling the epoch, not by sleeping a duration.** The rule is
+/// that a reveal must land in a *strictly later epoch* than its commitment, and
+/// an epoch comes from the record rather than from a clock. `sleep 610` is a
+/// guess at that rule; re-reading the epoch until it changes is the rule.
+///
+/// **It never shortens the epoch itself.** A real round takes a real epoch --
+/// 600 seconds by default -- and `PROOFWORK_EPOCH_SECONDS` exists for exactly
+/// this kind of local trial. Setting it here, silently, for a command that
+/// writes to whatever log it was pointed at, is the documented footgun in
+/// `docs/launch-review.md`: a log written under a short epoch and read back
+/// under a long one puts every commitment and its claim in the same epoch, so
+/// every replayed reveal is refused and record sync stops importing work
+/// without erroring. So the wait is announced up front, in seconds, with the
+/// variable named -- and the operator decides.
+/// One round's inputs, grouped because they travel together and because most
+/// of them are strings -- passed positionally, swapping two would compile
+/// cleanly and write the wrong record.
+struct Round<'a> {
+    /// An objective id, or a file to post first.
+    objective: &'a str,
+    who: Submitter<'a>,
+    artifact_path: &'a str,
+    nonce: Option<&'a str>,
+    cites: &'a [String],
+    settle: bool,
+}
+
+fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i32, CliError> {
+    let Round {
+        objective,
+        who,
+        artifact_path,
+        nonce,
+        cites,
+        settle,
+    } = round;
+    // A file, or an id already in the log. Deciding by prefix rather than by
+    // `Path::exists` keeps the two cases from swapping under a stray file
+    // named after a digest.
+    let objective_id = if objective.starts_with("sha256:") {
+        objective.to_string()
+    } else {
+        // Posting an objective already in the log is not an error *here*, even
+        // though `post` refuses it. An objective's id is the hash of its own
+        // content, so "already posted" means byte-identical -- there is nothing
+        // to reconcile and no rule being relaxed. Refusing would break the one
+        // thing this command exists for: pointing it at the same file again
+        // after editing an artifact is the local iteration loop.
+        let data = read_json(objective)?;
+        validate_objective(&data).map_err(CliError::Schema)?;
+        let id = Objective::from_value(&data).map_err(CliError::Record)?.id();
+        if open_node(options)?.objectives().contains_key(&id) {
+            say(out, format!("objective {id}"));
+            say(out, "  already posted; using it");
+            id
+        } else {
+            post_objective_file(out, options, objective)?
+        }
+    };
+
+    let nonce = match nonce {
+        Some(nonce) => nonce.to_string(),
+        None => random_nonce()?,
+    };
+    let (submitter, identity) = who.resolve()?;
+    let artifact = read_json(artifact_path)?;
+
+    let stamp = timestamp();
+    let hash = commitment_hash(&objective_id, &submitter, &artifact, &nonce);
+    let commitment = Commitment::new(&objective_id, &submitter, hash.as_str(), stamp.as_str());
+    let commitment = match &identity {
+        Some(identity) => commitment.signed_with(identity),
+        None => commitment,
+    };
+    {
+        let mut node = open_node_for_writing(options)?;
+        post_commitment(&mut node, &commitment, &stamp)?;
+    }
+    // From the commitment's own `created_at`, not from a second clock reading.
+    // The rule is that an epoch comes from the record, and a clock read a
+    // moment later can land on the far side of a boundary the record did not
+    // cross -- which would make this wait a whole extra epoch for nothing.
+    let committed_in = epoch_of_stamp(&stamp)?;
+    say(out, format!("commit {}", short(&hash)));
+    say(out, format!("  nonce {nonce}"));
+
+    // Announced before the wait, not after it: a command that goes quiet for
+    // ten minutes is indistinguishable from one that has hung, and the usual
+    // response to a hang is to kill it -- which leaves a commitment nobody
+    // ever opened.
+    let length = proofwork::partition::epoch_seconds();
+    say(
+        out,
+        format!(
+            "  waiting for epoch {} to start; epochs are {length}s here, so this takes up to \
+             {length}s",
+            committed_in.saturating_add(1)
+        ),
+    );
+    if length >= proofwork::partition::EPOCH_SECONDS {
+        say(
+            out,
+            format!(
+                "  (set ${}=10 for a local trial -- but only against a log used for nothing \
+                 else: epochs are derived from record timestamps, so two settings disagree \
+                 about which reveals were legal)",
+                proofwork::partition::EPOCH_SECONDS_ENV
+            ),
+        );
+    }
+    wait_for_epoch_after(committed_in)?;
+
+    // The frontier citation is mechanical, not a choice: once an objective has
+    // a frontier, *every* submission must cite the claim holding it, and a
+    // reveal without it is refused. Added here rather than left to the caller
+    // because a wrapper that reliably fails on every progressive objective is
+    // not a wrapper. Anything the caller passed is kept -- claims you actually
+    // built on are yours to name and nothing else may be added.
+    let mut cites = cites.to_vec();
+    {
+        let node = open_node(options)?;
+        if let Some(frontier) = node.frontier_of(&objective_id) {
+            if !cites.iter().any(|cited| cited == &frontier.claim_id) {
+                say(out, format!("  citing the frontier {}", frontier.claim_id));
+                cites.push(frontier.claim_id);
+            }
+        }
+    }
+
+    let stamp = timestamp();
+    let claim = Claim::new(
+        &objective_id,
+        &submitter,
+        artifact,
+        &nonce,
+        stamp.as_str(),
+        cites,
+    )
+    .map_err(CliError::Record)?;
+    let claim = match &identity {
+        Some(identity) => claim.signed_with(identity),
+        None => claim,
+    };
+    validate_claim(&claim.to_value()).map_err(CliError::Schema)?;
+
+    let mut node = open_node_for_writing(options)?;
+    let report = reveal_claim(&mut node, &claim, &stamp)?;
+    say(out, format!("claim {}", report.claim_id));
+    say(
+        out,
+        format!("  verdict  {}: {}", report.status, report.detail),
+    );
+
+    match report.pending_epoch {
+        Some(epoch) if settle => {
+            drop(node);
+            say(
+                out,
+                format!("  waiting for epoch {epoch} to close, then settling"),
+            );
+            wait_for_epoch_after(epoch)?;
+            let mut node = open_node_for_writing(options)?;
+            let settled = settle_now(&mut node, &timestamp())?;
+            match settled
+                .iter()
+                .find(|(claim_id, _, _, _)| claim_id == &report.claim_id)
+            {
+                Some((_, moved, reward, note)) => say(
+                    out,
+                    format!("  settled  {moved}  reward {reward}  ({note})"),
+                ),
+                // The batch closed without this claim in it. Reported rather
+                // than assumed: settlement order is not ours to predict, and a
+                // claim missing from its own batch is worth looking at.
+                None => say(
+                    out,
+                    "  settled  nothing moved for this claim in the batch that just closed",
+                ),
+            }
+        }
+        Some(epoch) => say(
+            out,
+            format!(
+                "  pending  settles when epoch {epoch} closes  (`proofwork try --settle`, or \
+                 `proofwork settle` later)"
+            ),
+        ),
+        None => say(
+            out,
+            format!(
+                "  settled  {}  reward {}  ({})",
+                report.settled, report.reward, report.note
+            ),
+        ),
+    }
+
+    // Same exit meaning as `reveal`: a rejection is a real answer and exits 0,
+    // a verdict that settles nothing exits 3.
+    Ok(if report.settles { 0 } else { 3 })
+}
+
+/// Block until the current epoch is strictly after `epoch`.
+///
+/// Polls rather than sleeping a computed duration. The seconds-remaining
+/// arithmetic is advisory -- it reads a clock, and the rule reads records --
+/// so it decides only how long to nap between checks, never when to stop.
+fn wait_for_epoch_after(epoch: u64) -> Result<(), CliError> {
+    // Progress to stderr, so `try ... > verdict.txt` still captures exactly the
+    // round. A minute of silence is what makes a caller reach for Ctrl-C, and a
+    // killed `try` leaves a commitment nobody ever opened.
+    const TICK: u64 = 1;
+    const REPORT_EVERY: u64 = 30;
+    let mut waited = 0u64;
+    loop {
+        if current_epoch()? > epoch {
+            if waited >= REPORT_EVERY {
+                eprintln!("  epoch turned after {waited}s");
+            }
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(TICK));
+        waited = waited.saturating_add(TICK);
+        if waited.is_multiple_of(REPORT_EVERY) {
+            eprintln!(
+                "  still waiting for epoch {} ({waited}s)",
+                epoch.saturating_add(1)
+            );
+        }
+    }
+}
+
+/// `scaffold <name> --kind <kind> [--out DIR] ...`
+///
+/// Writes files and stops. The next step is a human reading them and running
+/// the `post` line this prints -- see [`proofwork::scaffold`] for why that
+/// boundary is where it is.
+fn cmd_scaffold(
+    out: &mut dyn Write,
+    options: &Options,
+    request: &scaffold::Request,
+    force: bool,
+) -> Result<i32, CliError> {
+    let plan = scaffold::plan(request).map_err(|error| CliError::Usage(error.to_string()))?;
+    let root = Path::new(&options.root);
+
+    // Every collision found before anything is written, so a refusal leaves the
+    // directory exactly as it was. Scaffolding over an objective already posted
+    // is the mistake worth being careful about: its pin is in the log and its
+    // id covers it, so the log would still name a file that no longer exists.
+    if !force {
+        let existing: Vec<&str> = plan
+            .files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| root.join(path).exists())
+            .collect();
+        if !existing.is_empty() {
+            return Err(CliError::Usage(format!(
+                "scaffold would overwrite {}: {}. Pass --force if that is what you meant \
+                 -- but if any of these is already posted, its pin is in the log and its \
+                 id covers it",
+                existing.len(),
+                existing.join(", ")
+            )));
+        }
+    }
+
+    for (path, contents) in &plan.files {
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|source| CliError::Io {
+                context: format!("creating {}", parent.display()),
+                source,
+            })?;
+        }
+        fs::write(&target, contents).map_err(|source| CliError::Io {
+            context: format!("writing {}", target.display()),
+            source,
+        })?;
+        say(out, format!("wrote {path}"));
+    }
+
+    say(out, "");
+    say(out, "before posting, decide:");
+    for item in &plan.todo {
+        say(out, format!("  - {item}"));
+    }
+    say(out, "");
+    // Printed rather than run. The scaffolder writes files; funding one is a
+    // human decision, and this is where it is handed back.
+    //
+    // The paths here are where the files actually landed, which is not the path
+    // inside the record: a pin resolves against `--root`, while `post` and
+    // `--artifact` read relative to the working directory. Printing the record's
+    // spelling would hand back a command that works only when the two coincide.
+    let root_flag = if options.root == "." {
+        String::new()
+    } else {
+        format!(" --root {}", options.root)
+    };
+    let on_disk = |path: &str| root.join(path).display().to_string();
+    let artifact = plan
+        .objective_path
+        .strip_suffix("objective.json")
+        .map(|dir| format!("{dir}artifact.json"))
+        .unwrap_or_else(|| String::from("artifact.json"));
+    say(out, "then post it:");
+    say(
+        out,
+        format!(
+            "  proofwork{root_flag} post {}",
+            on_disk(&plan.objective_path)
+        ),
+    );
+    say(
+        out,
+        format!(
+            "  proofwork{root_flag} try {} --submitter you --artifact {}",
+            on_disk(&plan.objective_path),
+            on_disk(&artifact)
+        ),
+    );
+    Ok(0)
+}
+
+/// `incentives --sweep NAME=LO..HI[:STEPS] ... [--out FILE] [--format csv|jsonl]`
+///
+/// The same evaluation `cmd_incentives` runs, once per grid point, as a table.
+/// Nothing is re-derived here: a disagreement between a swept row and the
+/// single-point report for the same parameters would be a bug in the sweep, and
+/// keeping that true is worth more than any per-point formatting.
+///
+/// The table goes to `--out` or to standard output, and progress goes to
+/// standard error, so `incentives --sweep .. > grid.csv` writes exactly the
+/// table -- the same split `--robustness` already makes.
+fn cmd_incentives_sweep(
+    out: &mut dyn Write,
+    params: &NodeParams,
+    axes: &[sweep::Axis],
+    robustness: bool,
+    destination: Option<&str>,
+    format: TableFormat,
+) -> Result<i32, CliError> {
+    // Sized before anything runs, so an operator who mistyped a step count
+    // finds out now rather than after the first minute of silence.
+    let points = sweep::grid(axes).map_err(|error| CliError::Usage(error.to_string()))?;
+    eprintln!(
+        "sweeping {} point(s) over {}",
+        points.len(),
+        axes.iter()
+            .map(|axis| format!("{} ({} value(s))", axis.knob.name(), axis.values.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if robustness {
+        // `--robustness` is hundreds of solver runs *per point*. Composing is
+        // what the flag means, so it is allowed; being quiet about the cost
+        // would not be.
+        eprintln!(
+            "  --robustness re-walks every parameter at every point: expect minutes per point"
+        );
+    }
+
+    let mut rows = sweep::run(params, axes, |done, total| {
+        // Every point, not every tenth: the grid is small enough that a line
+        // per point is a progress bar, and a sweep that prints nothing for a
+        // minute is indistinguishable from a hang.
+        eprintln!("  [{}/{total}]", done.saturating_add(1));
+    })
+    .map_err(|error| CliError::Usage(error.to_string()))?;
+
+    if robustness {
+        // Zipped rather than indexed. `points` and `rows` line up because
+        // `sweep::run` enumerates the same pure `grid(axes)`; if that ever
+        // stops being true the column is simply absent rather than attached to
+        // the wrong point, and a margin reported against the wrong parameters
+        // is worse than no margin at all.
+        for (assignment, row) in points.iter().zip(rows.iter_mut()) {
+            let mut point = params.clone();
+            for (axis, value) in axes.iter().zip(assignment) {
+                axis.knob.apply(&mut point, *value);
+            }
+            // Four outcomes, spelled differently, because collapsing them
+            // would make an empty cell mean "nothing binds here" and "we could
+            // not tell" at once -- and the whole use of this column is deciding
+            // which measurement to fund first.
+            let binding = match point.validate() {
+                // A point `validate` refuses has no margins to report; its row
+                // already carries the reason in `error`. Blank rather than
+                // absent, so every row still has the same columns.
+                Err(_) => String::new(),
+                Ok(()) => {
+                    match proofwork::incentive::robustness::margins_reporting(&point, |_, _, _| {})
+                    {
+                        Ok(margins) => margins
+                            .iter()
+                            .find(|margin| margin.factor.is_some())
+                            .map(|margin| margin.parameter.to_string())
+                            // The same sentence the single-point report gives:
+                            // either nothing breaks within the ladder, or the
+                            // point already fails and there is no margin to
+                            // measure from. `verdict` tells them apart.
+                            .unwrap_or_else(|| String::from("none")),
+                        Err(_) => String::from("unavailable"),
+                    }
+                }
+            };
+            row.cells
+                .push((String::from("binding_constraint"), binding));
+        }
+    }
+
+    let table = match format {
+        TableFormat::Csv => sweep::to_csv(&rows),
+        TableFormat::Jsonl => sweep::to_jsonl(&rows),
+    };
+    match destination {
+        Some(path) => {
+            fs::write(path, &table).map_err(|source| CliError::Io {
+                context: format!("writing {path}"),
+                source,
+            })?;
+            let passing = rows.iter().filter(|row| row.passes()).count();
+            say(
+                out,
+                format!(
+                    "{} row(s) written to {path}  ({passing} pass, {} do not)",
+                    rows.len(),
+                    rows.len().saturating_sub(passing)
+                ),
+            );
+        }
+        None => {
+            for line in table.lines() {
+                say(out, line);
+            }
+        }
+    }
+
+    // Exit 1 when no point holds, matching the single-point command's meaning
+    // of "the incentives do not hold". A sweep whose whole point is to find
+    // where the mechanism breaks would be useless if any failing row failed
+    // the command, so the bar is that *something* in the grid works.
+    Ok(if rows.iter().any(sweep::Row::passes) {
+        0
+    } else {
+        1
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4545,7 +5329,50 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Availability { action } => cmd_availability(out, options, action),
         Command::Attribute { params } => cmd_attribute(out, options, params),
         Command::Blob { action } => cmd_blob(out, options, action),
-        Command::Incentives { params, robustness } => cmd_incentives(out, params, *robustness),
+        Command::Try {
+            objective,
+            submitter,
+            artifact,
+            nonce,
+            identity,
+            cites,
+            settle,
+        } => cmd_try(
+            out,
+            options,
+            Round {
+                objective,
+                who: Submitter {
+                    declared: submitter,
+                    identity: identity.as_deref(),
+                },
+                artifact_path: artifact,
+                nonce: nonce.as_deref(),
+                cites,
+                settle: *settle,
+            },
+        ),
+        Command::Scaffold { request, force } => cmd_scaffold(out, options, request, *force),
+        Command::Incentives {
+            params,
+            robustness,
+            sweep,
+            out: destination,
+            format,
+        } => {
+            if sweep.is_empty() {
+                cmd_incentives(out, params, *robustness)
+            } else {
+                cmd_incentives_sweep(
+                    out,
+                    params,
+                    sweep,
+                    *robustness,
+                    destination.as_deref(),
+                    *format,
+                )
+            }
+        }
         Command::Canon { input } => cmd_canon(out, input),
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
@@ -5626,6 +6453,9 @@ mod tests {
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
                 robustness: false,
+                sweep: Vec::new(),
+                out: None,
+                format: TableFormat::Csv,
             }
         );
         // Opt-in, because a margin table is hundreds of full solver runs.
@@ -5636,8 +6466,252 @@ mod tests {
             Command::Incentives {
                 params: Box::new(NodeParams::reference()),
                 robustness: true,
+                sweep: Vec::new(),
+                out: None,
+                format: TableFormat::Csv,
             }
         );
+    }
+
+    /// The flags are `commit`'s and `reveal`'s, deliberately: a flag that meant
+    /// something different here would cost more than the convenience is worth.
+    #[test]
+    fn try_takes_the_same_flags_as_the_two_commands_it_wraps() {
+        let parsed = parse(argv(&[
+            "try",
+            "examples/collatz/objective.json",
+            "--submitter",
+            "alice",
+            "--artifact",
+            "a.json",
+            "--nonce",
+            "abc",
+            "--cites",
+            "sha256:aa",
+            "sha256:bb",
+            "--settle",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Try {
+                objective,
+                submitter,
+                artifact,
+                nonce,
+                cites,
+                settle,
+                ..
+            } => {
+                assert_eq!(objective, "examples/collatz/objective.json");
+                assert_eq!(submitter, "alice");
+                assert_eq!(artifact, "a.json");
+                assert_eq!(nonce.as_deref(), Some("abc"));
+                assert_eq!(cites, vec!["sha256:aa", "sha256:bb"]);
+                assert!(settle);
+            }
+            other => panic!("expected a try command, got {other:?}"),
+        }
+    }
+
+    /// An id and a file are different things and must not be confused: a file
+    /// named after a digest is a file, and an id is never posted.
+    #[test]
+    fn try_tells_an_objective_id_from_a_file_by_its_prefix() {
+        for objective in ["sha256:aabb", "examples/collatz/objective.json", "sha256"] {
+            let parsed = parse(argv(&[
+                "try",
+                objective,
+                "--submitter",
+                "alice",
+                "--artifact",
+                "a.json",
+            ]))
+            .expect("parses");
+            match parsed.command {
+                Command::Try { objective: got, .. } => assert_eq!(got, objective),
+                other => panic!("expected a try command, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn try_needs_an_objective_an_artifact_and_somebody_to_submit_as() {
+        assert!(parse(argv(&["try"])).is_err());
+        assert!(parse(argv(&["try", "obj.json"])).is_err());
+        assert!(parse(argv(&["try", "obj.json", "--artifact", "a.json"])).is_err());
+        assert!(parse(argv(&["try", "obj.json", "--submitter", "alice"])).is_err());
+        assert!(parse(argv(&[
+            "try",
+            "obj.json",
+            "--submitter",
+            "alice",
+            "--artifact",
+            "a.json"
+        ]))
+        .is_ok());
+        // An identity file decides the submitter, so the name is optional --
+        // the same rule `commit` follows, for the same reason.
+        assert!(parse(argv(&[
+            "try",
+            "obj.json",
+            "--identity",
+            "k.json",
+            "--artifact",
+            "a.json"
+        ]))
+        .is_ok());
+    }
+
+    /// `--settle` is opt-in, and an empty `--nonce` generates one, exactly as
+    /// `commit` does.
+    #[test]
+    fn try_defaults_match_the_commands_it_wraps() {
+        let parsed = parse(argv(&[
+            "try",
+            "obj.json",
+            "--submitter",
+            "alice",
+            "--artifact",
+            "a.json",
+            "--nonce",
+            "",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Try {
+                nonce,
+                settle,
+                cites,
+                ..
+            } => {
+                assert_eq!(nonce, None);
+                assert!(!settle);
+                assert!(cites.is_empty());
+            }
+            other => panic!("expected a try command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scaffold_needs_a_name_and_a_kind() {
+        assert!(parse(argv(&["scaffold"])).is_err());
+        assert!(parse(argv(&["scaffold", "widget"])).is_err());
+        assert!(parse(argv(&["scaffold", "widget", "--kind", "nonsense"])).is_err());
+        assert!(parse(argv(&["scaffold", "widget", "--kind", "certificate"])).is_ok());
+    }
+
+    /// A pin resolves against `--root`. An `--out` that leaves it makes an
+    /// objective that verifies on the author's machine and nowhere else, so it
+    /// is refused before any directory is created.
+    #[test]
+    fn scaffold_refuses_an_out_that_escapes_the_bundle_root() {
+        for out in ["/tmp", "../elsewhere"] {
+            assert!(
+                parse(argv(&[
+                    "scaffold", "widget", "--kind", "lean", "--out", out
+                ]))
+                .is_err(),
+                "{out} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn scaffold_carries_the_flags_it_was_given() {
+        let parsed = parse(argv(&[
+            "scaffold",
+            "widget",
+            "--kind",
+            "evaluator",
+            "--out",
+            "challenges",
+            "--reward",
+            "5000",
+            "--funder",
+            "treasury",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Scaffold { request, force } => {
+                assert_eq!(request.name, "widget");
+                assert_eq!(request.kind, scaffold::Kind::Evaluator);
+                assert_eq!(request.parent, "challenges");
+                assert_eq!(request.reward, 5000);
+                assert_eq!(request.funder, "treasury");
+                // Overwriting is opt-in: the obvious mistake is scaffolding
+                // over an objective already in the log.
+                assert!(!force);
+            }
+            other => panic!("expected a scaffold command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sweep_axis_becomes_a_grid_and_leaves_the_base_alone() {
+        let parsed = parse(argv(&[
+            "incentives",
+            "--nodes",
+            "40",
+            "--sweep",
+            "canary-rate=1/20..1/5:5",
+        ]))
+        .expect("parses");
+        match parsed.command {
+            Command::Incentives { params, sweep, .. } => {
+                // The un-swept flags still describe the base point: a sweep
+                // narrows what varies, it does not discard the rest.
+                assert_eq!(params.nodes, 40);
+                assert_eq!(sweep.len(), 1);
+                assert_eq!(sweep[0].values.len(), 5);
+            }
+            other => panic!("expected an incentives command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sweeping_one_parameter_twice_is_refused_rather_than_resolved() {
+        let error = parse(argv(&[
+            "incentives",
+            "--sweep",
+            "stake=1000..2000:2",
+            "--sweep",
+            "stake=3000..4000:2",
+        ]))
+        .expect_err("two ranges for one column");
+        assert!(format!("{error}").contains("swept twice"), "{error}");
+    }
+
+    /// `--out` and `--format` describe a table. Without `--sweep` there is no
+    /// table, and silently ignoring them would leave an operator waiting for a
+    /// file that was never written.
+    #[test]
+    fn table_flags_without_a_sweep_are_refused() {
+        assert!(parse(argv(&["incentives", "--out", "grid.csv"])).is_err());
+        assert!(parse(argv(&["incentives", "--format", "jsonl"])).is_err());
+        assert!(parse(argv(&[
+            "incentives",
+            "--sweep",
+            "stake=1000..2000:2",
+            "--format",
+            "jsonl"
+        ]))
+        .is_ok());
+    }
+
+    /// A base point an axis is about to overwrite must not be rejected up
+    /// front: `--sweep threshold=1..3` over a base whose threshold exceeds its
+    /// committee is a perfectly ordinary request.
+    #[test]
+    fn a_sweep_defers_validation_to_the_points_it_actually_evaluates() {
+        assert!(parse(argv(&["incentives", "--threshold", "99"])).is_err());
+        assert!(parse(argv(&[
+            "incentives",
+            "--threshold",
+            "99",
+            "--sweep",
+            "threshold=1..3:3"
+        ]))
+        .is_ok());
     }
 
     #[test]

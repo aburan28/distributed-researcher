@@ -204,10 +204,20 @@ fn escape(text: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Lowercase hex, two characters per byte.
+///
+/// `sha2` 0.11's output type dropped the `LowerHex` impl the previous
+/// `format!("{:x}", ..)` spelling relied on. Spelled out here rather than
+/// reached for from the primary implementation: the hex text of a digest *is*
+/// a record id, and this crate exists to derive those independently.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn digest_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{DIGEST_PREFIX}{:x}", hasher.finalize())
+    format!("{DIGEST_PREFIX}{}", hex_lower(&hasher.finalize()))
 }
 
 /// Display form. By characters, never bytes: these strings come from records

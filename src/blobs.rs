@@ -54,6 +54,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::hex;
 use sha2::{Digest as _, Sha256};
 
 /// Where a store lives under a bundle root.
@@ -83,7 +84,7 @@ pub const MAX_BLOB_BYTES: usize = 1 << 20;
 pub fn address(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(&hasher.finalize())
 }
 
 /// Whether `text` is a well-formed content address.

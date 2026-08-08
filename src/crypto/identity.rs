@@ -796,26 +796,16 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> Zeroizing<[u8; 32]> {
 
 /// Lowercase hex.
 ///
+/// One encoder, in [`crate::hex`]: a second copy here would be a second thing
+/// that could disagree with the spelling of a published key. Kept as a local
+/// alias because every call site in this module reads as `hex_encode(..)` and
+/// the indirection is free.
+///
 /// **Not constant time**: it branches per nibble. Every value it is applied to —
 /// public keys, signatures — is published, and no secret in this module has a hex
 /// or `Display` form precisely so that this function cannot be pointed at one.
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        out.push(hex_digit(byte >> 4));
-        out.push(hex_digit(byte & 0x0f));
-    }
-    out
-}
-
-fn hex_digit(value: u8) -> char {
-    match value {
-        0..=9 => char::from(b'0' + value),
-        10..=15 => char::from(b'a' + value - 10),
-        // Unreachable: callers pass a nibble. Total anyway, because a panic in a
-        // formatter is a worse outcome than an odd character.
-        _ => '?',
-    }
+    crate::hex::encode(bytes)
 }
 
 /// Strict decoder: lowercase only, exact length.

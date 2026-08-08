@@ -22,6 +22,20 @@ proofwork incentives --canary-rate 0           # what breaks without canaries
 proofwork incentives --settled 500000          # what breaks at bootstrap
 ```
 
+Tuning a parameter means asking where it *stops* holding, not whether it holds
+at one point, and that is a grid rather than a report:
+
+```sh
+proofwork incentives --sweep canary-rate=1/20..1/5:5 --sweep stake=1000..10000:4 \
+                     --out sweep.csv
+```
+
+One row per grid point, with the same measurements the single-point report
+carries. It runs the same evaluation -- a swept row that disagreed with
+`incentives` at the same parameters would be a bug in the sweep -- and a point
+`validate` refuses becomes a row carrying its reason rather than stopping the
+table early. `--format jsonl` if that suits the thing you plot with better.
+
 ## Three services, and only one of them is hard
 
 | service | who holds the right answer | so the fix is |

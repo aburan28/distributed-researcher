@@ -85,9 +85,9 @@ claim and you hand every submitter a free lottery ticket per restamp.
   actually lives: two nodes disagreeing about whether a record is admissible
   disagree about what was settled, and neither ever errors
 - `./scripts/mcp-smoke.sh` if you touched `src/bin/mcp.rs`
-- `./scripts/demo.sh` and `./scripts/ratchet-demo.sh` if you touched the CLI or
-  the rules; they are the only checks that exercise epoch boundaries against a
-  real clock rather than a fixture timestamp
+- `./scripts/demo.sh`, `./scripts/ratchet-demo.sh` and `./scripts/try-demo.sh`
+  if you touched the CLI or the rules; they are the only checks that exercise
+  epoch boundaries against a real clock rather than a fixture timestamp
 
 ## House style
 

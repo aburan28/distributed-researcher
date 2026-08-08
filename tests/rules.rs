@@ -152,7 +152,7 @@ impl Drop for TempDir {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    proofwork::hex::encode(&hasher.finalize())
 }
 
 /// Write pinned source into the bundle root and return the hash the objective
