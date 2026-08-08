@@ -42,16 +42,16 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 #
 # Raising any of them means raising the set, in one reviewed change, with the
 # call sites updated -- see the `ignore` entries in .github/dependabot.yml.
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 
 # Confidentiality layer. Censorship resistance needs unlinkable, sealed
 # submissions that can be revealed WITHOUT the submitter being online -- see
 # docs/censorship.md. Threshold secret sharing is implemented in-crate over
 # GF(2^8) rather than pulled in, so the reconstruction path is auditable here.
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+chacha20poly1305 = "0.11"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 classic-mceliece-rust = { version = "3.1.0", default-features = false, features = ["mceliece348864", "zeroize", "alloc"] }
