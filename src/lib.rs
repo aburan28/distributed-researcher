@@ -22,6 +22,7 @@ pub mod attribution;
 pub mod blobs;
 pub mod canonical;
 pub mod checkpoint;
+pub mod corpus;
 pub mod crypto;
 pub mod dht;
 pub mod frontier;
