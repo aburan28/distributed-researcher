@@ -53,7 +53,7 @@ jobs:
       # so, and `build.rs` would happily embed the rest of it.
       - name: the export has an entry point
         run: test -f ui/out/index.html
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ui-out
           path: ui/out
