@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/aburan28/distributed-researcher/compare/v1.0.1...v1.1.0) (2026-08-22)
+
+
+### Features
+
+* **site:** publish to Pages, and add the two pages a visitor needs ([#95](https://github.com/aburan28/distributed-researcher/issues/95)) ([ff10af2](https://github.com/aburan28/distributed-researcher/commit/ff10af295069e45d80e944958f45981be36304ee))
+
+
+### Documentation
+
+* **agents:** fix two stale "Known limits" claims ([#101](https://github.com/aburan28/distributed-researcher/issues/101)) ([165195a](https://github.com/aburan28/distributed-researcher/commit/165195ad02c6bcded175a61940037b22d7cfa6c9))
+* **pages:** record why the site is still not published ([#97](https://github.com/aburan28/distributed-researcher/issues/97)) ([8e0d265](https://github.com/aburan28/distributed-researcher/commit/8e0d265f9c03b12e7738c7ec873cb15785817ee8))
+
 ## [1.0.1](https://github.com/aburan28/distributed-researcher/compare/v1.0.0...v1.0.1) (2026-08-15)
 
 

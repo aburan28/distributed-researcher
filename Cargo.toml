@@ -1,6 +1,6 @@
 [package]
 name = "cairn"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 # Verified, not asserted: `cargo +1.85.0 check --all-targets` passes and 1.75
 # provably does not -- transitive dependencies now require edition2024, which
